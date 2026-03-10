@@ -1,0 +1,36 @@
+name = "bug-reporter-bot"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Secrets (set via `wrangler secret put`):
+# TELEGRAM_BOT_TOKEN
+# OPENAI_API_KEY
+# GEMINI_API_KEY
+# LINEAR_API_KEY
+# WEBHOOK_SECRET
+# LINEAR_WEBHOOK_SECRET
+
+# Non-secret vars (set your own values):
+[vars]
+LINEAR_TEAM_ID = ""
+ALLOWED_CHATS = ""
+ADMIN_USERS = ""
+
+[triggers]
+crons = ["0 * * * *", "0 9 * * 1"]
+
+[[kv_namespaces]]
+binding = "BUG_REPORTS"
+id = ""  # wrangler kv namespace create BUG_REPORTS
+
+[[r2_buckets]]
+bucket_name = "bug-media"
+binding = "MEDIA_BUCKET"
+
+[ai]
+binding = "AI"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "bug-reports-index"
