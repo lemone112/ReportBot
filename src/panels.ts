@@ -55,7 +55,7 @@ export function buildTeamMainPanel(team: TeamConfig): Panel {
   const lines = ["\u2699\uFE0F <b>Управление командой</b>", ""];
 
   if (roles.length === 0) {
-    lines.push("<i>Нет ролей. Добавьте первую!_");
+    lines.push("<i>Нет ролей. Добавьте первую!</i>");
   } else {
     for (const [, role] of roles) {
       lines.push(role.member
