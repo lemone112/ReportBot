@@ -1,7 +1,8 @@
 import type {
-  Env, TelegramUpdate, TelegramMessage, TelegramUser,
-  PendingReject, PendingTeamSet, PendingTeamName, PendingReport,
-  LinearWebhookPayload, IssueMapping,
+  Env, TelegramUpdate, TelegramMessage,
+  PendingReject, PendingTeamName, PendingReport,
+  PendingChatBind, PendingPmAdd,
+  LinearWebhookPayload, IssueMapping, ProjectConfig,
 } from "./types";
 import {
   sendMessage, sendMessageWithButtons, editMessageText,
@@ -10,21 +11,20 @@ import {
 import { getLinearIssue, listLinearIssuesByTeam, deleteIssueVector } from "./composio";
 import { updateBotAvatar } from "./avatar";
 import { sendWeeklyDigest } from "./digest";
-import { CE, esc, isChatAllowed, isAdmin, userName, priorityLabel, getTeamConfig } from "./utils";
+import {
+  CE, esc, isChatAllowed, isAdmin, userName, priorityLabel,
+  resolveProjectForChat, getProjectConfig, getProjectList, isAnyProjectManager,
+} from "./utils";
 import { buildMainPanel } from "./panels";
 import {
-  handleCallbackQuery, handleTeamSetEmail, handleTeamNameInput,
-  handleRejectionComment,
+  handleCallbackQuery, handleTeamNameInput,
+  handleRejectionComment, handleChatBindInput, handlePmAddInput,
 } from "./callbacks";
 import {
   createReportFlow, createReportFlowSilent,
   handleMediaGroup, processSingleReport,
 } from "./reports";
-
-// Linear state IDs
-const STATE_DONE = "a36c8892-9daa-4127-8e36-7553e2afff8a";
-const STATE_IN_PROGRESS = "5c2e2165-d492-4963-b3f2-1eda3a2e7135";
-const STATE_REVIEW = "3532014a-1092-408c-9aeb-94dc38871d7d";
+import { migrateToMultiProject } from "./migrate";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -39,7 +39,9 @@ export default {
     }
 
     if (url.pathname === "/webhook" && request.method === "POST") {
-      // Verify webhook secret if configured
+      // Run migration on first request if needed
+      ctx.waitUntil(migrateToMultiProject(env).catch((e) => console.error("Migration error:", e)));
+
       if (env.WEBHOOK_SECRET) {
         const secretHeader = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
         if (secretHeader !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
@@ -110,18 +112,24 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 
-  // Cron triggers
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(updateBotAvatar(env));
 
     const schedDate = new Date(controller.scheduledTime);
 
-    // Weekly digest: Friday 15:00 UTC (18:00 MSK)
+    // Weekly digest: Friday 15:00 UTC (18:00 MSK) — per-project
     if (schedDate.getUTCDay() === 5 && schedDate.getUTCHours() === 15 && schedDate.getUTCMinutes() === 0) {
       ctx.waitUntil((async () => {
-        const enabled = await env.BUG_REPORTS.get("settings:digest_enabled");
-        if (enabled === "false") return;
-        await sendWeeklyDigest(env);
+        const slugs = await getProjectList(env);
+        for (const slug of slugs) {
+          const enabled = await env.BUG_REPORTS.get(`settings:digest:${slug}`);
+          if (enabled === "false") continue;
+          try {
+            await sendWeeklyDigest(env, slug);
+          } catch (e) {
+            console.error(`Digest failed for ${slug}:`, e);
+          }
+        }
       })());
     }
   },
@@ -186,21 +194,23 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, origin: st
   if (!message) return;
 
   const isPrivate = message.chat.type === "private";
+  const userId = message.from?.id;
 
-  // Private chat: admin panel + pending inputs
-  if (isPrivate && isAdmin(message.from?.id, env)) {
+  // Private chat: admin/PM panel + pending inputs
+  if (isPrivate && userId && (isAdmin(userId, env) || await isAnyProjectManager(userId, env))) {
     if (message.text && !message.text.startsWith("/")) {
-      // Pending report from admin panel
-      const reportKey = `pending_report:${message.chat.id}:${message.from?.id}`;
+      // 1. Pending report
+      const reportKey = `pending_report:${message.chat.id}:${userId}`;
       const reportPendingJson = await env.BUG_REPORTS.get(reportKey);
       if (reportPendingJson) {
         await env.BUG_REPORTS.delete(reportKey);
         const rp = JSON.parse(reportPendingJson) as PendingReport;
         await editMessageWithButtons(env, rp.panelChatId, rp.panelMessageId, `${CE.LOADING} <b>Репорт принят!</b> Обрабатываю...`, []);
+        const project = rp.projectSlug ? await getProjectConfig(env, rp.projectSlug) : null;
         try {
           await createReportFlowSilent(
             message.chat.id, message.message_id, userName(message.from),
-            message.text, [], [], [], env, rp.panelChatId, rp.panelMessageId,
+            message.text, [], [], [], env, rp.panelChatId, rp.panelMessageId, project,
           );
         } catch (e) {
           await editMessageWithButtons(env, rp.panelChatId, rp.panelMessageId,
@@ -210,26 +220,35 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, origin: st
         return;
       }
 
-      // Pending team email input
-      const teamSetKey = `pending_team_set:${message.chat.id}:${message.from?.id}`;
-      const teamPendingJson = await env.BUG_REPORTS.get(teamSetKey);
-      if (teamPendingJson) {
-        await handleTeamSetEmail(message, JSON.parse(teamPendingJson) as PendingTeamSet, teamSetKey, env);
-        return;
-      }
-
-      // Pending team role name input
-      const teamNameKey = `pending_team_name:${message.chat.id}:${message.from?.id}`;
+      // 2. Pending team name
+      const teamNameKey = `pending_team_name:${message.chat.id}:${userId}`;
       const teamNameJson = await env.BUG_REPORTS.get(teamNameKey);
       if (teamNameJson) {
         await handleTeamNameInput(message, JSON.parse(teamNameJson) as PendingTeamName, teamNameKey, env);
         return;
       }
+
+      // 3. Pending chat bind
+      const chatBindKey = `pending_chat_bind:${message.chat.id}:${userId}`;
+      const chatBindJson = await env.BUG_REPORTS.get(chatBindKey);
+      if (chatBindJson) {
+        await handleChatBindInput(message, JSON.parse(chatBindJson) as PendingChatBind, chatBindKey, env);
+        return;
+      }
+
+      // 4. Pending PM add
+      const pmAddKey = `pending_pm_add:${message.chat.id}:${userId}`;
+      const pmAddJson = await env.BUG_REPORTS.get(pmAddKey);
+      if (pmAddJson) {
+        await handlePmAddInput(message, JSON.parse(pmAddJson) as PendingPmAdd, pmAddKey, env);
+        return;
+      }
     }
   }
 
-  // Group chat: only react in allowed chats
-  if (!isChatAllowed(message.chat.id, env)) return;
+  // Check if chat is allowed (either via binding or ALLOWED_CHATS)
+  const chatAllowed = isChatAllowed(message.chat.id, env) || await resolveProjectForChat(env, message.chat.id) !== null;
+  if (!isPrivate && !chatAllowed) return;
 
   // Pending rejection comment
   if (message.text && !message.text.startsWith("/")) {
@@ -239,7 +258,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, origin: st
       await handleRejectionComment(message, JSON.parse(pendingJson) as PendingReject, rejectKey, env);
       return;
     }
-    return; // Ignore non-command messages in group chats
+    if (!isPrivate) return; // Ignore non-command messages in group chats
   }
 
   // Commands
@@ -249,7 +268,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, origin: st
   }
 
   // Reply to a message with /report
-  if (message.reply_to_message && message.text?.startsWith("/report") && isChatAllowed(message.chat.id, env)) {
+  if (message.reply_to_message && message.text?.startsWith("/report")) {
+    const project = await resolveProjectForChat(env, message.chat.id);
     const replyText = message.text.replace(/^\/report(@\S+)?/i, "").trim();
     const origText = message.reply_to_message.text || message.reply_to_message.caption || "";
     const fullReplyText = (replyText || "") + (origText ? "\n\n[Контекст]: " + origText : "");
@@ -271,13 +291,12 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, origin: st
       await sendMessage(env, message.chat.id, `${CE.ERROR} Не удалось прочитать сообщение`, message.message_id);
       return;
     }
-    await createReportFlow(message.chat.id, message.message_id, userName(message.from), fullReplyText, rImages, [], rMediaUrls, env);
+    await createReportFlow(message.chat.id, message.message_id, userName(message.from), fullReplyText, rImages, [], rMediaUrls, env, project);
     return;
   }
 
-  // /report as caption on media (single photo/video or first in media group)
+  // /report as caption on media
   if (message.caption?.startsWith("/report")) {
-    // Rate limit check
     const rlKeyM = `ratelimit:report:${message.chat.id}`;
     const rlDataM = await env.BUG_REPORTS.get(rlKeyM);
     const rlCountM = rlDataM ? parseInt(rlDataM, 10) : 0;
@@ -295,7 +314,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, origin: st
     return;
   }
 
-  // Subsequent messages in an active media group (no caption, but buffer exists)
+  // Subsequent messages in an active media group
   if (message.media_group_id) {
     const bufferKey = `mediagroup:${message.media_group_id}`;
     const existing = await env.BUG_REPORTS.get(bufferKey);
@@ -307,7 +326,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, origin: st
 }
 
 // ============================================================
-// Commands: /start, /status, /list, /report
+// Commands
 // ============================================================
 
 async function handleCommand(message: TelegramMessage, env: Env, origin: string): Promise<void> {
@@ -317,8 +336,8 @@ async function handleCommand(message: TelegramMessage, env: Env, origin: string)
 
   if (text.startsWith("/start") || text.startsWith("/help")) {
     if (isPrivate) {
-      if (isAdmin(message.from?.id, env)) {
-        const mainPanel = await buildMainPanel(env, true);
+      if (isAdmin(message.from?.id, env) || await isAnyProjectManager(message.from?.id || 0, env)) {
+        const mainPanel = buildMainPanel(isAdmin(message.from?.id, env));
         await sendMessageWithButtons(env, chatId, mainPanel.text, mainPanel.buttons);
       } else {
         await sendMessage(env, chatId, "\uD83E\uDD16 Этот бот работает в рабочем чате проекта.\n\nИспользуйте <code>/report</code> в группе для создания задач.");
@@ -330,12 +349,21 @@ async function handleCommand(message: TelegramMessage, env: Env, origin: string)
   }
 
   if (text.startsWith("/admin") || text.startsWith("/team") || text.startsWith("/settings") || text.startsWith("/digest")) {
-    if (message.chat.type !== "private" || !isAdmin(message.from?.id, env)) {
+    if (message.chat.type !== "private") {
+      await sendMessage(env, chatId, "Используйте эту команду в личных сообщениях с ботом");
+      return;
+    }
+    if (!isAdmin(message.from?.id, env) && !await isAnyProjectManager(message.from?.id || 0, env)) {
       await sendMessage(env, chatId, "Нет доступа");
       return;
     }
-    const mp = await buildMainPanel(env, true);
+    const mp = buildMainPanel(isAdmin(message.from?.id, env));
     await sendMessageWithButtons(env, chatId, mp.text, mp.buttons);
+    return;
+  }
+
+  if (text.startsWith("/chatid")) {
+    await sendMessage(env, chatId, `Chat ID: <code>${chatId}</code>`);
     return;
   }
 
@@ -361,16 +389,19 @@ async function handleCommand(message: TelegramMessage, env: Env, origin: string)
   }
 
   if (text.startsWith("/list")) {
+    const project = await resolveProjectForChat(env, chatId);
+    const teamId = project?.teamId;
     try {
-      const issues = await listLinearIssuesByTeam(env);
+      const issues = await listLinearIssuesByTeam(env, teamId);
       const active = issues.filter((i) => !["completed", "canceled"].includes(i.stateType));
       if (active.length === 0) {
         await sendMessage(env, chatId, "Нет открытых задач");
         return;
       }
+      const header = project ? `<b>${esc(project.projectName)} — Открытые (${active.length}):</b>` : `<b>Открытые задачи (${active.length}):</b>`;
       const lines = active.slice(0, 20).map((i) =>
         `\u2022 <b>${esc(i.identifier)}</b> ${esc(i.title)} — <i>${esc(i.stateName)}</i>`);
-      await sendMessage(env, chatId, `<b>Открытые задачи (${active.length}):</b>\n\n${lines.join("\n")}`);
+      await sendMessage(env, chatId, `${header}\n\n${lines.join("\n")}`);
     } catch (e) {
       await sendMessage(env, chatId, `Ошибка: ${e instanceof Error ? e.message : "неизвестная"}`);
     }
@@ -378,7 +409,6 @@ async function handleCommand(message: TelegramMessage, env: Env, origin: string)
   }
 
   if (text.startsWith("/report")) {
-    // Rate limit: 5 reports per 5 minutes per chat
     const rlKey = `ratelimit:report:${chatId}`;
     const rlData = await env.BUG_REPORTS.get(rlKey);
     const rlCount = rlData ? parseInt(rlData, 10) : 0;
@@ -393,13 +423,14 @@ async function handleCommand(message: TelegramMessage, env: Env, origin: string)
       await sendMessage(env, chatId, "Использование: /report описание бага\n\nИли отправьте фото/видео с подписью /report");
       return;
     }
-    await createReportFlow(chatId, message.message_id, userName(message.from), reportText, [], [], [], env);
+    const project = await resolveProjectForChat(env, chatId);
+    await createReportFlow(chatId, message.message_id, userName(message.from), reportText, [], [], [], env, project);
     return;
   }
 }
 
 // ============================================================
-// Linear webhook handling
+// Linear webhook handling (dynamic states)
 // ============================================================
 
 async function handleLinearWebhook(payload: LinearWebhookPayload, env: Env): Promise<void> {
@@ -415,8 +446,12 @@ async function handleLinearWebhook(payload: LinearWebhookPayload, env: Env): Pro
   if (!mappingJson) return;
   const mapping = JSON.parse(mappingJson) as IssueMapping;
 
-  // "На проверке" -> review buttons
-  if (stateId === STATE_REVIEW) {
+  // Load project config for dynamic state comparison
+  const pSlug = mapping.projectSlug || "valwin";
+  const project = await getProjectConfig(env, pSlug);
+
+  // "Review" state -> review buttons
+  if (project?.states.review && stateId === project.states.review) {
     await sendMessageWithButtons(env, mapping.chatId,
       [
         `\uD83D\uDD0D <b>Задача на проверке</b>`,
@@ -444,8 +479,8 @@ async function handleLinearWebhook(payload: LinearWebhookPayload, env: Env): Pro
     }
   }
 
-  // Started (in progress)
-  if (stateType === "started" && stateId !== STATE_REVIEW && mapping) {
+  // Started (in progress) — but not the review state
+  if (stateType === "started" && stateId !== project?.states.review) {
     await sendMessage(env, mapping.chatId,
       `${CE.PROGRESS} <b>Взяли в работу</b>\n\n${esc(payload.data.title)}`);
   }

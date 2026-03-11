@@ -1,4 +1,4 @@
-import type { Env, TelegramUser, TeamConfig, LinearWorkspaceUser } from "./types";
+import type { Env, TelegramUser, TeamConfig, ProjectConfig, ChatBinding, LinearWorkspaceUser } from "./types";
 
 // Custom emoji constants for Telegram
 export const CE = {
@@ -67,10 +67,61 @@ export function userName(user?: TelegramUser): string {
   return [user.first_name, user.last_name].filter(Boolean).join(" ");
 }
 
-export async function getTeamConfig(env: Env): Promise<TeamConfig> {
-  const json = await env.BUG_REPORTS.get("settings:team");
+export async function getTeamConfig(env: Env, projectSlug?: string): Promise<TeamConfig> {
+  const key = projectSlug ? `settings:team:${projectSlug}` : "settings:team";
+  const json = await env.BUG_REPORTS.get(key);
   if (!json) return {};
   return JSON.parse(json) as TeamConfig;
+}
+
+export async function saveTeamConfig(env: Env, team: TeamConfig, projectSlug?: string): Promise<void> {
+  const key = projectSlug ? `settings:team:${projectSlug}` : "settings:team";
+  await env.BUG_REPORTS.put(key, JSON.stringify(team));
+}
+
+export async function getProjectList(env: Env): Promise<string[]> {
+  const json = await env.BUG_REPORTS.get("project_list");
+  if (!json) return [];
+  return JSON.parse(json) as string[];
+}
+
+export async function getProjectConfig(env: Env, slug: string): Promise<ProjectConfig | null> {
+  const json = await env.BUG_REPORTS.get(`project:${slug}`);
+  if (!json) return null;
+  return JSON.parse(json) as ProjectConfig;
+}
+
+export async function saveProjectConfig(env: Env, project: ProjectConfig): Promise<void> {
+  await env.BUG_REPORTS.put(`project:${project.slug}`, JSON.stringify(project));
+}
+
+export async function resolveProjectForChat(env: Env, chatId: number): Promise<ProjectConfig | null> {
+  const bindingJson = await env.BUG_REPORTS.get(`chat_binding:${chatId}`);
+  if (!bindingJson) return null;
+  const binding = JSON.parse(bindingJson) as ChatBinding;
+  return getProjectConfig(env, binding.projectSlug);
+}
+
+export async function isProjectManager(userId: number, slug: string, env: Env): Promise<boolean> {
+  const project = await getProjectConfig(env, slug);
+  if (!project) return false;
+  return project.managers.includes(userId);
+}
+
+export async function isAnyProjectManager(userId: number, env: Env): Promise<boolean> {
+  const slugs = await getProjectList(env);
+  for (const slug of slugs) {
+    if (await isProjectManager(userId, slug, env)) return true;
+  }
+  return false;
+}
+
+export function projectSlug(name: string): string {
+  return name.trim().toLowerCase()
+    .replace(/[^a-z0-9а-яё-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 10);
 }
 
 const MANAGER_PATTERNS = /менеджер|manager|лид|lead|руководитель|директор|director|продюсер|producer|\bpm\b|\bcto\b|\bceo\b/i;
@@ -103,10 +154,10 @@ export function resolveAssignment(
   return { userId: undefined, roleName: undefined };
 }
 
-export async function trackMetric(env: Env, metric: string): Promise<void> {
+export async function trackMetric(env: Env, metric: string, pSlug?: string): Promise<void> {
   try {
     const today = new Date().toISOString().slice(0, 10);
-    const key = `metrics:${today}:${metric}`;
+    const key = pSlug ? `metrics:${today}:${pSlug}:${metric}` : `metrics:${today}:${metric}`;
     const val = await env.BUG_REPORTS.get(key);
     const count = val ? parseInt(val, 10) + 1 : 1;
     await env.BUG_REPORTS.put(key, String(count), { expirationTtl: 60 * 60 * 24 * 90 });
@@ -115,14 +166,15 @@ export async function trackMetric(env: Env, metric: string): Promise<void> {
   }
 }
 
-export async function getMetrics(env: Env, days: number): Promise<Record<string, number>> {
+export async function getMetrics(env: Env, days: number, pSlug?: string): Promise<Record<string, number>> {
   const result: Record<string, number> = {};
   const now = new Date();
   for (let d = 0; d < days; d++) {
     const date = new Date(now.getTime() - d * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const metrics = ["reports_created", "reports_failed", "voice_reports", "inline_reports", "duplicates_found"];
     for (const m of metrics) {
-      const val = await env.BUG_REPORTS.get(`metrics:${date}:${m}`);
+      const key = pSlug ? `metrics:${date}:${pSlug}:${m}` : `metrics:${date}:${m}`;
+      const val = await env.BUG_REPORTS.get(key);
       if (val) {
         if (!result[m]) result[m] = 0;
         result[m] += parseInt(val, 10);
