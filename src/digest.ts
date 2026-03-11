@@ -37,14 +37,14 @@ export async function sendWeeklyDigest(env: Env): Promise<void> {
     if (inProgress.length > 0) {
       lines.push(`${CE.PROGRESS} <b>В работе:</b>`);
       inProgress.slice(0, 10).forEach((i) => lines.push(`\u2022 ${esc(i.title)}`));
-      if (inProgress.length > 10) lines.push(`_...и ещё ${inProgress.length - 10}_`);
+      if (inProgress.length > 10) lines.push(`<i>...и ещё ${inProgress.length - 10}</i>`);
       lines.push("");
     }
 
     if (planned.length > 0) {
       lines.push(`${CE.INBOX} <b>Запланировано:</b>`);
       planned.slice(0, 8).forEach((i) => lines.push(`\u2022 ${esc(i.title)}`));
-      if (planned.length > 8) lines.push(`_...и ещё ${planned.length - 8}_`);
+      if (planned.length > 8) lines.push(`<i>...и ещё ${planned.length - 8}</i>`);
       lines.push("");
     }
 
@@ -64,5 +64,6 @@ export async function sendWeeklyDigest(env: Env): Promise<void> {
           `\u274C Ошибка при генерации отчёта: ${e instanceof Error ? e.message : "unknown"}`);
       }
     } catch { /* ignore */ }
+    throw e;
   }
 }

@@ -94,7 +94,7 @@ export async function createReportFlow(
       ``,
       `<b>${esc(report.title)}</b>`,
       `Приоритет: ${priorityLabel(report.priority)}`,
-      report.labels.length > 0 ? `Метки: ${report.labels.join(", ")}` : "",
+      report.labels.length > 0 ? `Метки: ${report.labels.map(esc).join(", ")}` : "",
       assigneeName ? `Назначен: <b>${esc(assigneeName)}</b>` : "",
       ``,
       issueUrl ? `<a href="${issueUrl}">${issueId} — Открыть в Linear</a>` : `Задача: ${issueId}`,
@@ -201,7 +201,7 @@ export async function createReportFlowSilent(
     `<b>${esc(report.title)}</b>`,
     `Приоритет: ${priorityLabel(report.priority)}`,
   ];
-  if (report.labels.length > 0) parts.push(`Метки: ${report.labels.join(", ")}`);
+  if (report.labels.length > 0) parts.push(`Метки: ${report.labels.map(esc).join(", ")}`);
   if (assigneeName) parts.push(`Назначен: <b>${esc(assigneeName)}</b>`);
   parts.push("", cr.issueUrl ? `<a href="${cr.issueUrl}">${cr.issueId} — Открыть в Linear</a>` : cr.issueId);
 

@@ -3,7 +3,7 @@ import { CE, esc, isAdmin, getTeamConfig, type Btn, type Panel } from "./utils";
 import { getBotUsername } from "./telegram";
 
 export function roleSlug(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, "-");
+  return name.trim().toLowerCase().replace(/[^a-z0-9а-яё-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
 
 export async function buildMainPanel(env: Env, showAdmin: boolean): Promise<Panel> {
