@@ -28,15 +28,16 @@ export async function createReportFlow(
 
   try {
     const team = await getTeamConfig(env, project?.slug);
+    const labels = project?.labels;
     let report;
     try {
       report = videosForAI.length > 0 && env.GEMINI_API_KEY
-        ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team)
-        : await analyzeBugReport(env, text, imagesForAI, team);
+        ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team, labels)
+        : await analyzeBugReport(env, text, imagesForAI, team, labels);
     } catch (aiErr: unknown) {
       console.error("AI analysis failed, retrying text-only:", aiErr instanceof Error ? aiErr.message : aiErr);
       if (text && text.trim()) {
-        report = await analyzeBugReport(env, text, [], team);
+        report = await analyzeBugReport(env, text, [], team, labels);
       } else {
         throw aiErr;
       }
@@ -152,15 +153,16 @@ export async function createReportFlowSilent(
   project?: ProjectConfig | null,
 ): Promise<void> {
   const team = await getTeamConfig(env, project?.slug);
+  const labels = project?.labels;
   let report;
   try {
     report = videosForAI.length > 0 && env.GEMINI_API_KEY
-      ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team)
-      : await analyzeBugReport(env, text, imagesForAI, team);
+      ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team, labels)
+      : await analyzeBugReport(env, text, imagesForAI, team, labels);
   } catch (aiErr: unknown) {
     console.error("AI analysis failed (silent), retrying text-only:", aiErr instanceof Error ? (aiErr as Error).message : aiErr);
     if (text && text.trim()) {
-      report = await analyzeBugReport(env, text, [], team);
+      report = await analyzeBugReport(env, text, [], team, labels);
     } else {
       throw aiErr;
     }
