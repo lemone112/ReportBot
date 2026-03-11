@@ -118,7 +118,7 @@ export async function handleCallbackQuery(
     const project = await getProjectConfig(env, pSlug);
     const doneState = project?.states.done;
     if (!doneState) {
-      await answerCallbackQuery(env, cq.id, "Состояние не найдено");
+      await answerCallbackQuery(env, cq.id, `Проект "${pSlug}" не найден или не настроен`);
       return;
     }
     await updateLinearIssueState(env, linearIssueId, doneState);
@@ -342,7 +342,8 @@ async function handleProjectCallback(
       const existingSlugs = await getProjectList(env);
       if (existingSlugs.includes(slug)) {
         let suffix = 2;
-        while (existingSlugs.includes(`${slug.slice(0, 8)}-${suffix}`)) suffix++;
+        while (existingSlugs.includes(`${slug.slice(0, 8)}-${suffix}`) && suffix < 100) suffix++;
+        if (suffix >= 100) throw new Error("Не удалось сгенерировать уникальный slug");
         slug = `${slug.slice(0, 8)}-${suffix}`;
       }
 
@@ -885,6 +886,22 @@ export async function handleChatBindInput(
 
   if (!input || isNaN(targetChatId)) {
     await sendMessage(env, message.chat.id, "Некорректный Chat ID. Отправьте числовой ID чата.");
+    return;
+  }
+
+  // Validate chat exists and bot has access
+  try {
+    const checkRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: targetChatId }),
+    });
+    if (!checkRes.ok) {
+      await sendMessage(env, message.chat.id, `\u274C Чат ${targetChatId} не найден или бот не добавлен в этот чат.`);
+      return;
+    }
+  } catch {
+    await sendMessage(env, message.chat.id, `\u274C Не удалось проверить чат ${targetChatId}. Попробуйте позже.`);
     return;
   }
 
