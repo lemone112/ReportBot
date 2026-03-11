@@ -880,7 +880,6 @@ export async function handleTeamNameInput(
 export async function handleChatBindInput(
   message: TelegramMessage, pending: PendingChatBind, kvKey: string, env: Env,
 ): Promise<void> {
-  await env.BUG_REPORTS.delete(kvKey);
   const input = (message.text || "").trim();
   const targetChatId = Number(input);
 
@@ -905,6 +904,8 @@ export async function handleChatBindInput(
     return;
   }
 
+  await env.BUG_REPORTS.delete(kvKey);
+
   // Create chat binding
   const binding: ChatBinding = { projectSlug: pending.projectSlug, projectName: "" };
   const project = await getProjectConfig(env, pending.projectSlug);
@@ -928,7 +929,6 @@ export async function handleChatBindInput(
 export async function handlePmAddInput(
   message: TelegramMessage, pending: PendingPmAdd, kvKey: string, env: Env,
 ): Promise<void> {
-  await env.BUG_REPORTS.delete(kvKey);
   const input = (message.text || "").trim();
   const uid = Number(input);
 
@@ -936,6 +936,8 @@ export async function handlePmAddInput(
     await sendMessage(env, message.chat.id, "Некорректный User ID. Отправьте числовой Telegram ID.");
     return;
   }
+
+  await env.BUG_REPORTS.delete(kvKey);
 
   const project = await getProjectConfig(env, pending.projectSlug);
   if (!project) {
