@@ -1,11 +1,33 @@
 import type { Env } from "./types";
 import { sendMessage } from "./telegram";
 import { listLinearIssuesByTeam } from "./composio";
-import { CE, esc } from "./utils";
+import { CE, esc, getProjectConfig, getProjectList } from "./utils";
 
-export async function sendWeeklyDigest(env: Env): Promise<void> {
+export async function sendWeeklyDigest(env: Env, projectSlug?: string): Promise<void> {
+  if (projectSlug) {
+    await sendDigestForProject(env, projectSlug);
+    return;
+  }
+
+  // Legacy: send for all projects
+  const slugs = await getProjectList(env);
+  for (const slug of slugs) {
+    const enabled = await env.BUG_REPORTS.get(`settings:digest:${slug}`);
+    if (enabled === "false") continue;
+    try {
+      await sendDigestForProject(env, slug);
+    } catch (e) {
+      console.error(`Digest failed for ${slug}:`, e);
+    }
+  }
+}
+
+async function sendDigestForProject(env: Env, slug: string): Promise<void> {
+  const project = await getProjectConfig(env, slug);
+  if (!project) throw new Error(`Project ${slug} not found`);
+
   try {
-    const issues = await listLinearIssuesByTeam(env);
+    const issues = await listLinearIssuesByTeam(env, project.teamId);
     const now = Date.now();
     const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
     const from = new Date(weekAgo);
@@ -20,7 +42,7 @@ export async function sendWeeklyDigest(env: Env): Promise<void> {
     const open = issues.filter((i) => !["completed", "canceled"].includes(i.stateType));
 
     const lines: string[] = [];
-    lines.push(`${CE.REPORT} <b>Отчёт за неделю (${weekRange})</b>`);
+    lines.push(`${CE.REPORT} <b>${esc(project.projectName)} — Отчёт за неделю (${weekRange})</b>`);
     lines.push("");
     lines.push(`Новых задач: <b>${createdThisWeek.length}</b>  \u2022  Выполнено: <b>${completedThisWeek.length}</b>  \u2022  В работе: <b>${inProgress.length}</b>`);
     lines.push("");
@@ -51,17 +73,20 @@ export async function sendWeeklyDigest(env: Env): Promise<void> {
     lines.push(`Всего открытых задач: <b>${open.length}</b>`);
 
     const text = lines.join("\n");
-    const chats = env.ALLOWED_CHATS.split(",").map((id) => id.trim());
-    for (const chatIdStr of chats) {
-      await sendMessage(env, Number(chatIdStr), text);
+
+    // Send to project's bound chats
+    const bindListJson = await env.BUG_REPORTS.get(`project_chats:${slug}`);
+    const chatIds: number[] = bindListJson ? JSON.parse(bindListJson) : [];
+    for (const chatId of chatIds) {
+      await sendMessage(env, chatId, text);
     }
   } catch (e) {
-    console.error("Weekly digest failed:", e);
+    console.error("Weekly digest failed for", slug, ":", e);
     try {
       const admins = env.ADMIN_USERS.split(",").map((id) => id.trim());
       for (const admin of admins) {
         await sendMessage(env, Number(admin),
-          `\u274C Ошибка при генерации отчёта: ${e instanceof Error ? e.message : "unknown"}`);
+          `\u274C Ошибка дайджеста (${esc(slug)}): ${e instanceof Error ? e.message : "unknown"}`);
       }
     } catch { /* ignore */ }
     throw e;

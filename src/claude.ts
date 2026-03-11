@@ -1,4 +1,4 @@
-import type { Env, BugReport, TeamConfig } from "./types";
+import type { Env, BugReport, TeamConfig, ProjectLabel } from "./types";
 
 const VALID_LABELS = new Set([
   "Баг", "Фича", "Доработка",
@@ -21,7 +21,8 @@ const EN_MAP: Record<string, string> = {
   moderation: "Модерация",
 };
 
-function normalizeReport(raw: Record<string, unknown>): BugReport {
+function normalizeReport(raw: Record<string, unknown>, validLabels?: Set<string>): BugReport {
+  const labelSet = validLabels ?? VALID_LABELS;
   return {
     title: typeof raw.title === "string" && raw.title.length > 0
       ? raw.title.slice(0, 80)
@@ -32,15 +33,18 @@ function normalizeReport(raw: Record<string, unknown>): BugReport {
     priority: [1, 2, 3, 4].includes(Number(raw.priority)) ? Number(raw.priority) : 3,
     labels: Array.isArray(raw.labels)
       ? (raw.labels as string[]).map((l) => {
-          if (VALID_LABELS.has(l)) return l;
-          for (const vl of VALID_LABELS) {
+          if (labelSet.has(l)) return l;
+          for (const vl of labelSet) {
             if (vl.toLowerCase() === l.toLowerCase()) return vl;
           }
-          const mapped = EN_MAP[l.toLowerCase()];
-          if (mapped) return mapped;
+          // EN_MAP fallback only for hardcoded default labels
+          if (!validLabels) {
+            const mapped = EN_MAP[l.toLowerCase()];
+            if (mapped) return mapped;
+          }
           return null;
         }).filter(Boolean) as string[]
-      : ["Баг"],
+      : validLabels ? [] : ["Баг"],
     assignee: typeof raw.assignee === "string" && raw.assignee.length > 0
       && raw.assignee !== "null" && raw.assignee !== "none"
       ? raw.assignee
@@ -48,23 +52,9 @@ function normalizeReport(raw: Record<string, unknown>): BugReport {
   };
 }
 
-function buildSystemPrompt(team: TeamConfig): string {
-  const rolesSection = buildRolesSection(team);
-
-  return `Ты — аналитик баг-репортов. Ты получаешь сырые отчёты об ошибках и запросы на доработку от пользователей (текст, скриншоты, превью видео) и форматируешь их в структурированные, понятные задачи для команды разработки.
-
-Анализируй ВСЮ предоставленную информацию — текстовые описания, скриншоты и видео — чтобы составить полный отчёт.
-
-Отвечай ТОЛЬКО валидным JSON по этой схеме:
-{
-  "title": "Короткий, описательный заголовок (макс 80 символов, на русском)",
-  "description": "Подробное описание в markdown (структура зависит от типа — см. ниже)",
-  "priority": <число 1-4: 1=срочно, 2=высокий, 3=средний, 4=низкий>,
-  "labels": ["одна или несколько меток из допустимого списка"],
-  "assignee": "slug роли из команды или null"
-}
-
-ДОПУСТИМЫЕ МЕТКИ (используй ТОЛЬКО эти, точные названия):
+function buildLabelsSection(labels?: ProjectLabel[]): string {
+  if (!labels || labels.length === 0) {
+    return `ДОПУСТИМЫЕ МЕТКИ (используй ТОЛЬКО эти, точные названия):
 
 Тип (обязательно одна):
 - "Баг" — ошибка, что-то сломалось
@@ -111,7 +101,63 @@ function buildSystemPrompt(team: TeamConfig): string {
 
 ПРАВИЛА КЛАССИФИКАЦИИ:
 - Всегда ставь одну из: "Баг", "Фича" или "Доработка" — это тип задачи
-- Добавляй 1-3 уточняющие метки из остальных категорий
+- Добавляй 1-3 уточняющие метки из остальных категорий`;
+  }
+
+  // Dynamic labels from project config
+  const grouped = new Map<string, string[]>();
+  const ungrouped: string[] = [];
+
+  for (const label of labels) {
+    if (label.parentName) {
+      const group = grouped.get(label.parentName) ?? [];
+      group.push(label.name);
+      grouped.set(label.parentName, group);
+    } else {
+      ungrouped.push(label.name);
+    }
+  }
+
+  let section = `ДОПУСТИМЫЕ МЕТКИ (используй ТОЛЬКО эти, точные названия):\n`;
+
+  if (ungrouped.length > 0) {
+    for (const name of ungrouped) {
+      section += `- "${name}"\n`;
+    }
+  }
+
+  for (const [parent, children] of grouped) {
+    section += `\n${parent}:\n`;
+    for (const name of children) {
+      section += `- "${name}"\n`;
+    }
+  }
+
+  section += `\nПРАВИЛА КЛАССИФИКАЦИИ:
+- Выбирай 1-4 наиболее подходящие метки из списка выше
+- Ориентируйся на суть задачи и контекст`;
+
+  return section;
+}
+
+function buildSystemPrompt(team: TeamConfig, labels?: ProjectLabel[]): string {
+  const rolesSection = buildRolesSection(team);
+  const labelsSection = buildLabelsSection(labels);
+
+  return `Ты — аналитик баг-репортов. Ты получаешь сырые отчёты об ошибках и запросы на доработку от пользователей (текст, скриншоты, превью видео) и форматируешь их в структурированные, понятные задачи для команды разработки.
+
+Анализируй ВСЮ предоставленную информацию — текстовые описания, скриншоты и видео — чтобы составить полный отчёт.
+
+Отвечай ТОЛЬКО валидным JSON по этой схеме:
+{
+  "title": "Короткий, описательный заголовок (макс 80 символов, на русском)",
+  "description": "Подробное описание в markdown (структура зависит от типа — см. ниже)",
+  "priority": <число 1-4: 1=срочно, 2=высокий, 3=средний, 4=низкий>,
+  "labels": ["одна или несколько меток из допустимого списка"],
+  "assignee": "slug роли из команды или null"
+}
+
+${labelsSection}
 - Приоритет: краши/потеря данных = 1, сломанный функционал = 2, визуальные/UX = 3, мелкие/косметические = 4
 
 СТРУКТУРА ОПИСАНИЯ:
@@ -181,8 +227,12 @@ export async function analyzeBugReport(
   text: string,
   images: { data: string; mediaType: string }[],
   team: TeamConfig,
+  labels?: ProjectLabel[],
 ): Promise<BugReport> {
-  const systemPrompt = buildSystemPrompt(team);
+  const systemPrompt = buildSystemPrompt(team, labels);
+  const validLabels = labels && labels.length > 0
+    ? new Set(labels.map((l) => l.name))
+    : undefined;
 
   // Text-only: prefer Gemini Flash if available
   if (images.length === 0 && env.GEMINI_API_KEY) {
@@ -207,7 +257,7 @@ export async function analyzeBugReport(
         if (gText) {
           const gCleaned = gText.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
           if (gCleaned.charAt(0) !== "{") throw new Error("AI returned non-JSON: " + gCleaned.slice(0, 80));
-          return normalizeReport(JSON.parse(gCleaned));
+          return normalizeReport(JSON.parse(gCleaned), validLabels);
         }
       }
       console.error("Gemini Flash failed for text, falling back to OpenAI");
@@ -258,7 +308,7 @@ export async function analyzeBugReport(
 
   const rtCleaned = rt.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
   if (rtCleaned.charAt(0) !== "{") throw new Error("AI returned non-JSON: " + rtCleaned.slice(0, 80));
-  return normalizeReport(JSON.parse(rtCleaned));
+  return normalizeReport(JSON.parse(rtCleaned), validLabels);
 }
 
 // ============================================================
@@ -331,8 +381,12 @@ export async function analyzeVideoReport(
   images: { data: string; mediaType: string }[],
   videos: { buffer: ArrayBuffer; mediaType: string }[],
   team: TeamConfig,
+  labels?: ProjectLabel[],
 ): Promise<BugReport> {
-  const systemPrompt = buildSystemPrompt(team);
+  const systemPrompt = buildSystemPrompt(team, labels);
+  const validLabels = labels && labels.length > 0
+    ? new Set(labels.map((l) => l.name))
+    : undefined;
   const parts: GeminiPart[] = [];
   let videoUploadFailed = false;
 
@@ -348,7 +402,7 @@ export async function analyzeVideoReport(
 
   if (videoUploadFailed && parts.length === 0 && images.length === 0) {
     console.log("All video uploads failed and no images, falling back to OpenAI");
-    return analyzeBugReport(env, text, images, team);
+    return analyzeBugReport(env, text, images, team, labels);
   }
 
   for (const img of images) {
@@ -383,7 +437,7 @@ export async function analyzeVideoReport(
     const err = await res.text();
     console.error(`Gemini API error (${res.status}): ${err}`);
     console.log("Gemini generateContent failed, falling back to OpenAI");
-    return analyzeBugReport(env, text, images, team);
+    return analyzeBugReport(env, text, images, team, labels);
   }
 
   const data = (await res.json()) as {
@@ -393,15 +447,15 @@ export async function analyzeVideoReport(
   const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) {
     console.error("Empty response from Gemini, falling back to OpenAI");
-    return analyzeBugReport(env, text, images, team);
+    return analyzeBugReport(env, text, images, team, labels);
   }
 
   const cleaned = rawText.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
   try {
     if (cleaned.charAt(0) !== "{") throw new Error("non-JSON");
-    return normalizeReport(JSON.parse(cleaned));
+    return normalizeReport(JSON.parse(cleaned), validLabels);
   } catch (parseErr) {
     console.error("Failed to parse Gemini JSON response:", cleaned.slice(0, 200));
-    return analyzeBugReport(env, text, images, team);
+    return analyzeBugReport(env, text, images, team, labels);
   }
 }

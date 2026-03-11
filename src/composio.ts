@@ -1,4 +1,4 @@
-import type { Env, BugReport, LinearIssueListItem, LinearWorkspaceUser } from "./types";
+import type { Env, BugReport, LinearIssueListItem, LinearWorkspaceUser, ProjectConfig, ProjectStates, ProjectLabel } from "./types";
 
 const LINEAR_GQL_API = "https://api.linear.app/graphql";
 
@@ -93,6 +93,7 @@ export async function createLinearIssue(
   report: BugReport,
   mediaUrls: string[],
   assigneeId?: string,
+  project?: ProjectConfig,
 ): Promise<{ issueId: string; issueUrl: string; linearIssueId: string }> {
   let description = report.description;
   if (mediaUrls.length > 0) {
@@ -106,22 +107,37 @@ export async function createLinearIssue(
     });
   }
 
-  const labelIds = report.labels
-    .map((l) => {
-      if (LABEL_MAP[l]) return LABEL_MAP[l];
-      for (const mk in LABEL_MAP) {
-        if (mk.toLowerCase() === l.toLowerCase()) return LABEL_MAP[mk];
-      }
-      return null;
-    })
-    .filter(Boolean) as string[];
+  let labelIds: string[];
+  if (project) {
+    labelIds = report.labels
+      .map((l) => {
+        const found = project.labels.find(
+          (pl) => pl.name === l || pl.name.toLowerCase() === l.toLowerCase(),
+        );
+        return found?.id ?? null;
+      })
+      .filter(Boolean) as string[];
+  } else {
+    labelIds = report.labels
+      .map((l) => {
+        if (LABEL_MAP[l]) return LABEL_MAP[l];
+        for (const mk in LABEL_MAP) {
+          if (mk.toLowerCase() === l.toLowerCase()) return LABEL_MAP[mk];
+        }
+        return null;
+      })
+      .filter(Boolean) as string[];
+  }
+
+  const teamId = project?.teamId ?? env.LINEAR_TEAM_ID;
+  if (!teamId) throw new Error("No teamId: provide project or set LINEAR_TEAM_ID");
 
   const input: Record<string, unknown> = {
     title: report.title,
     description,
-    teamId: env.LINEAR_TEAM_ID,
-    projectId: VALWIN_PROJECT_ID,
-    stateId: TRIAGE_STATE_ID,
+    teamId,
+    projectId: project?.projectId ?? VALWIN_PROJECT_ID,
+    stateId: project?.states.triage ?? TRIAGE_STATE_ID,
     priority: report.priority,
     labelIds,
   };
@@ -236,11 +252,14 @@ export async function findLinearUserByEmail(
 
 export async function listLinearIssuesByTeam(
   env: Env,
+  teamId?: string,
 ): Promise<LinearIssueListItem[]> {
+  const tid = teamId ?? env.LINEAR_TEAM_ID;
+  if (!tid) throw new Error("No teamId provided and LINEAR_TEAM_ID not set");
   const data = await linearGQL(
     env,
     `query($teamId: String!) { team(id: $teamId) { issues(first: 200, orderBy: createdAt) { nodes { identifier title url state { name type } priority createdAt completedAt assignee { name } } } } }`,
-    { teamId: env.LINEAR_TEAM_ID },
+    { teamId: tid },
     25_000,
   );
 
@@ -275,6 +294,82 @@ export async function listLinearWorkspaceUsers(
     .filter((u: any) => u.active !== false)
     .map((u: any) => ({ id: u.id || "", name: u.name || "?", email: u.email || "" }))
     .sort((a: LinearWorkspaceUser, b: LinearWorkspaceUser) => a.name.localeCompare(b.name));
+}
+
+// ============================================================
+// Multi-project: Linear team/project/state/label fetching
+// ============================================================
+
+export async function listLinearTeams(
+  env: Env,
+): Promise<{ id: string; name: string; key: string }[]> {
+  const data = await linearGQL(env,
+    `query { teams { nodes { id name key } } }`, {}, 15_000);
+  return (data.teams?.nodes || []).map((t: any) => ({
+    id: t.id, name: t.name || "?", key: t.key || "",
+  }));
+}
+
+export async function listTeamProjects(
+  env: Env,
+  teamId: string,
+): Promise<{ id: string; name: string }[]> {
+  const data = await linearGQL(env,
+    `query($teamId: String!) { team(id: $teamId) { projects { nodes { id name } } } }`,
+    { teamId }, 15_000);
+  return (data.team?.projects?.nodes || []).map((p: any) => ({
+    id: p.id, name: p.name || "?",
+  }));
+}
+
+export async function fetchTeamStates(
+  env: Env,
+  teamId: string,
+): Promise<ProjectStates> {
+  const data = await linearGQL(env,
+    `query($teamId: String!) { team(id: $teamId) { states { nodes { id name type position } } } }`,
+    { teamId }, 15_000);
+  const nodes: { id: string; name: string; type: string; position: number }[] =
+    (data.team?.states?.nodes || []).sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
+
+  let triage = "";
+  let inProgress = "";
+  let review: string | null = null;
+  let done = "";
+  let canceled = "";
+
+  for (const s of nodes) {
+    if (s.type === "triage" && !triage) triage = s.id;
+    if (s.type === "started" && !inProgress) inProgress = s.id;
+    if (s.type === "started" && /review|ревью|проверк/i.test(s.name)) review = s.id;
+    if (s.type === "completed" && !done) done = s.id;
+    if (s.type === "canceled" && !canceled) canceled = s.id;
+  }
+
+  if (!triage) {
+    const unstarted = nodes.find((s) => s.type === "unstarted" || s.type === "backlog");
+    if (unstarted) triage = unstarted.id;
+  }
+
+  if (!triage || !inProgress || !done) {
+    throw new Error("Не удалось определить базовые состояния (triage/inProgress/done) для этой команды");
+  }
+
+  return { triage, inProgress, review, done, canceled };
+}
+
+export async function fetchTeamLabels(
+  env: Env,
+  teamId: string,
+): Promise<ProjectLabel[]> {
+  const data = await linearGQL(env,
+    `query($teamId: String!) { team(id: $teamId) { labels { nodes { id name parent { name } } } } }`,
+    { teamId }, 15_000);
+  return (data.team?.labels?.nodes || []).map((l: any) => ({
+    id: l.id,
+    name: l.name || "?",
+    parentName: l.parent?.name,
+  }));
 }
 
 // ============================================================

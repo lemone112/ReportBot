@@ -3,7 +3,7 @@ export interface Env {
   OPENAI_API_KEY: string;
   GEMINI_API_KEY: string;
   LINEAR_API_KEY: string;
-  LINEAR_TEAM_ID: string;
+  LINEAR_TEAM_ID?: string; // legacy, used only for migration
   ALLOWED_CHATS: string;
   ADMIN_USERS: string;
   BUG_REPORTS: KVNamespace;
@@ -12,6 +12,39 @@ export interface Env {
   LINEAR_WEBHOOK_SECRET?: string;
   AI?: Ai;
   VECTORIZE?: VectorizeIndex;
+}
+
+// --- Multi-project types ---
+
+export interface ProjectStates {
+  triage: string;
+  inProgress: string;
+  review: string | null;
+  done: string;
+  canceled: string;
+}
+
+export interface ProjectLabel {
+  id: string;
+  name: string;
+  parentName?: string;
+}
+
+export interface ProjectConfig {
+  slug: string;
+  projectId: string;
+  projectName: string;
+  teamId: string;
+  teamKey: string;
+  states: ProjectStates;
+  labels: ProjectLabel[];
+  managers: number[];
+  createdAt: string;
+}
+
+export interface ChatBinding {
+  projectSlug: string;
+  projectName: string;
 }
 
 // --- Telegram types ---
@@ -119,6 +152,7 @@ export interface IssueMapping {
   issueId: string;
   issueUrl: string;
   title: string;
+  projectSlug?: string;
 }
 
 export interface MediaGroupBuffer {
@@ -153,17 +187,39 @@ export interface TeamRole {
 export type TeamConfig = Record<string, TeamRole>;
 
 export interface PendingTeamSet {
+  projectSlug: string;
   role: string;
   panelChatId: number;
   panelMessageId: number;
 }
 
 export interface PendingTeamName {
+  projectSlug: string;
   panelChatId: number;
   panelMessageId: number;
 }
 
 export interface PendingReport {
+  projectSlug: string;
+  panelChatId: number;
+  panelMessageId: number;
+}
+
+export interface PendingPick {
+  projectSlug: string;
+  roleId: string;
+  panelChatId: number;
+  panelMessageId: number;
+}
+
+export interface PendingChatBind {
+  projectSlug: string;
+  panelChatId: number;
+  panelMessageId: number;
+}
+
+export interface PendingPmAdd {
+  projectSlug: string;
   panelChatId: number;
   panelMessageId: number;
 }

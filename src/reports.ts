@@ -1,5 +1,5 @@
 import type {
-  Env, TelegramMessage, IssueMapping, MediaGroupBuffer,
+  Env, TelegramMessage, IssueMapping, MediaGroupBuffer, ProjectConfig,
 } from "./types";
 import {
   sendMessage, editMessageText, editMessageWithButtons,
@@ -12,6 +12,7 @@ import {
 } from "./composio";
 import {
   CE, esc, sleep, priorityLabel, userName, getTeamConfig, resolveAssignment, trackMetric,
+  resolveProjectForChat,
 } from "./utils";
 
 const MEDIA_GROUP_DELAY_MS = 3500;
@@ -20,22 +21,23 @@ export async function createReportFlow(
   chatId: number, messageId: number, reporterName: string,
   text: string, imagesForAI: { data: string; mediaType: string }[],
   videosForAI: { buffer: ArrayBuffer; mediaType: string }[],
-  mediaUrls: string[], env: Env,
+  mediaUrls: string[], env: Env, project?: ProjectConfig | null,
 ): Promise<void> {
   const loadingMsgId = await sendMessage(env, chatId,
     `${CE.LOADING} <b>Репорт принят!</b> Обрабатываю...`, messageId);
 
   try {
-    const team = await getTeamConfig(env);
+    const team = await getTeamConfig(env, project?.slug);
+    const labels = project?.labels;
     let report;
     try {
       report = videosForAI.length > 0 && env.GEMINI_API_KEY
-        ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team)
-        : await analyzeBugReport(env, text, imagesForAI, team);
+        ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team, labels)
+        : await analyzeBugReport(env, text, imagesForAI, team, labels);
     } catch (aiErr: unknown) {
       console.error("AI analysis failed, retrying text-only:", aiErr instanceof Error ? aiErr.message : aiErr);
       if (text && text.trim()) {
-        report = await analyzeBugReport(env, text, [], team);
+        report = await analyzeBugReport(env, text, [], team, labels);
       } else {
         throw aiErr;
       }
@@ -74,11 +76,12 @@ export async function createReportFlow(
       console.error("Duplicate search failed:", dupErr);
     }
 
-    const { issueId, issueUrl, linearIssueId } = await createLinearIssue(env, report, mediaUrls, assigneeId);
+    const { issueId, issueUrl, linearIssueId } = await createLinearIssue(env, report, mediaUrls, assigneeId, project ?? undefined);
 
     const mapping: IssueMapping = {
       chatId, messageId, reporterName, issueId, issueUrl,
       title: report.title,
+      projectSlug: project?.slug,
     };
     await env.BUG_REPORTS.put(`issue:${linearIssueId}`, JSON.stringify(mapping), {
       expirationTtl: 60 * 60 * 24 * 90,
@@ -86,7 +89,7 @@ export async function createReportFlow(
 
     // Store vector for future semantic search
     if (env.VECTORIZE && env.AI) {
-      await storeIssueVector(env, linearIssueId, report.title, report.description);
+      await storeIssueVector(env, linearIssueId, report.title, report.description, project?.projectId);
     }
 
     const replyParts = [
@@ -147,17 +150,19 @@ export async function createReportFlowSilent(
   videosForAI: { buffer: ArrayBuffer; mediaType: string }[],
   mediaUrls: string[], env: Env,
   editChatId: number, editMsgId: number,
+  project?: ProjectConfig | null,
 ): Promise<void> {
-  const team = await getTeamConfig(env);
+  const team = await getTeamConfig(env, project?.slug);
+  const labels = project?.labels;
   let report;
   try {
     report = videosForAI.length > 0 && env.GEMINI_API_KEY
-      ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team)
-      : await analyzeBugReport(env, text, imagesForAI, team);
+      ? await analyzeVideoReport(env, text, imagesForAI, videosForAI, team, labels)
+      : await analyzeBugReport(env, text, imagesForAI, team, labels);
   } catch (aiErr: unknown) {
     console.error("AI analysis failed (silent), retrying text-only:", aiErr instanceof Error ? (aiErr as Error).message : aiErr);
     if (text && text.trim()) {
-      report = await analyzeBugReport(env, text, [], team);
+      report = await analyzeBugReport(env, text, [], team, labels);
     } else {
       throw aiErr;
     }
@@ -186,14 +191,14 @@ export async function createReportFlowSilent(
     }
   } catch { /* ignore */ }
 
-  const cr = await createLinearIssue(env, report, mediaUrls, assigneeId);
+  const cr = await createLinearIssue(env, report, mediaUrls, assigneeId, project ?? undefined);
   await env.BUG_REPORTS.put(
     `issue:${cr.linearIssueId}`,
-    JSON.stringify({ chatId, messageId, reporterName, issueId: cr.issueId, issueUrl: cr.issueUrl, title: report.title }),
+    JSON.stringify({ chatId, messageId, reporterName, issueId: cr.issueId, issueUrl: cr.issueUrl, title: report.title, projectSlug: project?.slug } satisfies IssueMapping),
     { expirationTtl: 7_776_000 },
   );
 
-  if (env.VECTORIZE && env.AI) await storeIssueVector(env, cr.linearIssueId, report.title, report.description);
+  if (env.VECTORIZE && env.AI) await storeIssueVector(env, cr.linearIssueId, report.title, report.description, project?.projectId);
 
   const parts = [
     `${CE.SUCCESS} <b>Баг-репорт создан!</b>`,
@@ -297,7 +302,8 @@ export async function processMediaGroup(key: string, env: Env, origin: string): 
     }
   }
 
-  await createReportFlow(buffer.chatId, buffer.firstMessageId, buffer.reporterName, buffer.text, imagesForAI, videosForAI, mediaUrls, env);
+  const project = await resolveProjectForChat(env, buffer.chatId);
+  await createReportFlow(buffer.chatId, buffer.firstMessageId, buffer.reporterName, buffer.text, imagesForAI, videosForAI, mediaUrls, env, project);
 }
 
 // ============================================================
@@ -310,9 +316,10 @@ export async function processSingleReport(message: TelegramMessage, env: Env, or
   const coll = await collectAndUploadMedia(message, env, origin);
   const fullText = text + (coll.extraText ? "\n\n" + coll.extraText : "");
 
+  const project = await resolveProjectForChat(env, message.chat.id);
   await createReportFlow(
     message.chat.id, message.message_id, userName(message.from),
-    fullText, coll.imagesForAI, coll.videosForAI, coll.mediaUrls, env,
+    fullText, coll.imagesForAI, coll.videosForAI, coll.mediaUrls, env, project,
   );
 }
 
