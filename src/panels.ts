@@ -276,12 +276,10 @@ export function buildUserPickPanel(
   const lines = [`<b>${esc(roleName)}</b>`, "", "Выберите участника:"];
   const buttons: Btn[][] = [];
 
-  for (let i = 0; i < pageUsers.length; i++) {
-    const u = pageUsers[i];
-    const globalIdx = start + i;
+  for (const u of pageUsers) {
     buttons.push([{
       text: u.name + (u.email ? ` (${u.email.split("@")[0]})` : ""),
-      callback_data: `tp:${globalIdx}`,
+      callback_data: `tp:${u.id}`,
     }]);
   }
 

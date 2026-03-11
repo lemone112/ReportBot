@@ -389,21 +389,9 @@ async function handleProjectCallback(
     const team = await getTeamConfig(env, slug);
     const roleCount = Object.keys(team).length;
     const assignedCount = Object.values(team).filter((r) => r.member).length;
-    // Count chat bindings for this project
-    let chatCount = 0;
-    const allChats = env.ALLOWED_CHATS.split(",").map((c) => c.trim()).filter(Boolean);
-    for (const c of allChats) {
-      const bJson = await env.BUG_REPORTS.get(`chat_binding:${c}`);
-      if (bJson) {
-        const b = JSON.parse(bJson) as ChatBinding;
-        if (b.projectSlug === slug) chatCount++;
-      }
-    }
-    // Also scan known bindings from project config area (for dynamically added chats)
-    // Use a list key instead
     const bindListJson = await env.BUG_REPORTS.get(`project_chats:${slug}`);
     const boundChatIds: number[] = bindListJson ? JSON.parse(bindListJson) : [];
-    chatCount = boundChatIds.length;
+    const chatCount = boundChatIds.length;
 
     const panel = buildProjectDetailPanel(project, chatCount, roleCount, assignedCount);
     await editMessageWithButtons(env, chatId, msgId, panel.text, panel.buttons);
@@ -757,10 +745,10 @@ async function handleUserPickCallback(
   const usersJson = await env.BUG_REPORTS.get(`team_users:${chatId}`);
   const users: LinearWorkspaceUser[] = usersJson ? JSON.parse(usersJson) : [];
 
-  // tp:{index} — select user
+  // tp:{userId} — select user by ID
   if (cq.data.startsWith("tp:")) {
-    const idx = parseInt(cq.data.split(":")[1], 10);
-    const user = users[idx];
+    const userId = cq.data.split(":")[1];
+    const user = users.find((u) => u.id === userId);
     if (!user) {
       await answerCallbackQuery(env, cq.id, "Пользователь не найден");
       return;

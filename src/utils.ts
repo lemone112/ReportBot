@@ -118,10 +118,10 @@ export async function isAnyProjectManager(userId: number, env: Env): Promise<boo
 
 export function projectSlug(name: string): string {
   return name.trim().toLowerCase()
-    .replace(/[^a-z0-9а-яё-]/g, "-")
+    .replace(/[^a-z0-9-]/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
-    .slice(0, 10);
+    .slice(0, 20);
 }
 
 const MANAGER_PATTERNS = /менеджер|manager|лид|lead|руководитель|директор|director|продюсер|producer|\bpm\b|\bcto\b|\bceo\b/i;

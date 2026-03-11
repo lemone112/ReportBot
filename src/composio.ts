@@ -129,10 +129,13 @@ export async function createLinearIssue(
       .filter(Boolean) as string[];
   }
 
+  const teamId = project?.teamId ?? env.LINEAR_TEAM_ID;
+  if (!teamId) throw new Error("No teamId: provide project or set LINEAR_TEAM_ID");
+
   const input: Record<string, unknown> = {
     title: report.title,
     description,
-    teamId: project?.teamId ?? env.LINEAR_TEAM_ID,
+    teamId,
     projectId: project?.projectId ?? VALWIN_PROJECT_ID,
     stateId: project?.states.triage ?? TRIAGE_STATE_ID,
     priority: report.priority,
